@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BZ交易系统 1.5.3 - 冷静期版
+BZ交易系统 1.5.6 - 实盘测试版
 =======================
-版本: 1.5.3
+版本: 1.5.6
 日期: 2026-03-09
 作者: 包子
 
@@ -14,6 +14,9 @@ BZ交易系统 1.5.3 - 冷静期版
 - 增强风控
 - 模型保存/加载
 - 新增30分钟冷静期，同品种不重复开仓
+- 修复：平仓后也要记录时间，冷静期从平仓开始算
+- 新增：自动检测止盈止损平仓并记录冷静期
+- 实盘参数：初始资金$1000，手数0.03
 
 运行: python ai_jiaoyi_mt5_v1_5.py
 """
@@ -73,7 +76,7 @@ class Config:
     MAX_POSITION = 1.0
     
     # 风控参数
-    CIRCUIT_BREAKER_LOSS = 0.03
+    CIRCUIT_BREAKER_LOSS = 0.10  # 日亏损10%
     MAX_DAILY_TRADES = 50  # 增加到50次
     MAX_DRAWDOWN = 0.10
     
@@ -391,7 +394,7 @@ class TradeExecutor:
         self.symbol = symbol
         self.position = 0
     
-    def open_position(self, action, volume=0.1):
+    def open_position(self, action, volume=0.03):
         # 确保MT5已连接
         if MT5_AVAILABLE and not mt5.terminal_info().connected:
             mt5.initialize(login=Config.MT5_LOGIN, server=Config.MT5_SERVER, password=Config.MT5_PASSWORD)
@@ -462,6 +465,9 @@ class TradeExecutor:
         result = mt5.order_send(request)
         if result.retcode == mt5.TRADE_RETCODE_DONE:
             self.position = 0
+            # 写入平仓日志
+            with open('D:/包子交易系统/logs/trade_20260309.log', 'a', encoding='utf-8') as f:
+                f.write(f"[平仓成功] {self.symbol} @ {price}\n")
             return True
         return False
     
@@ -483,6 +489,7 @@ class RiskManager:
         self.circuit_breaker = False
         self.last_reset = datetime.now().date()
         self.peak_balance = 0
+        self.last_balance = 0  # 上次余额，用于自动计算盈亏
     
     def reset_daily(self):
         today = datetime.now().date()
@@ -494,10 +501,16 @@ class RiskManager:
     
     def check(self, balance, pnl=0):
         self.reset_daily()
+        # 自动计算余额变化
+        if self.last_balance > 0:
+            delta = balance - self.last_balance
+            if delta != 0:
+                self.daily_pnl += delta
+        self.last_balance = balance
+        
         # 更新峰值余额
         if balance > self.peak_balance:
             self.peak_balance = balance
-        self.daily_pnl += pnl
         if balance > 0 and abs(self.daily_pnl) / balance >= Config.CIRCUIT_BREAKER_LOSS:
             self.circuit_breaker = True
             return False, f"日亏损熔断: {abs(self.daily_pnl)/balance:.2%}"
@@ -519,7 +532,7 @@ class RiskManager:
 class Logger:
     def __init__(self):
         os.makedirs('logs', exist_ok=True)
-        self.file = f"logs/trade_{datetime.now().strftime('%Y%m%d')}.log"
+        self.file = f"D:/包子交易系统/logs/trade_{datetime.now().strftime('%Y%m%d')}.log"
     
     def log(self, msg, level="INFO"):
         line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{level}] {msg}"
@@ -542,6 +555,8 @@ class BZTradingSystem:
         
         # 冷静期记录：每个品种的最后下单时间
         self.last_trade_time = {symbol: None for symbol in Config.SYMBOLS}
+        # 上次持仓记录，用于检测自动平仓
+        self.previous_position = {symbol: 0 for symbol in Config.SYMBOLS}
         
         for symbol in Config.SYMBOLS:
             self.ensembles[symbol] = EnsembleModel(symbol)
@@ -549,7 +564,7 @@ class BZTradingSystem:
     
     def initialize(self):
         self.logger.log("=" * 50)
-        self.logger.log("BZ交易系统 1.5.3 启动 (冷静期版)")
+        self.logger.log("BZ交易系统 1.5.6 启动 (实盘测试版 - 手数0.03)")
         self.logger.log(f"交易品种: {Config.SYMBOLS}")
         self.logger.log(f"冷静期: {Config.COOLDOWN_MINUTES}分钟")
         self.logger.log("=" * 50)
@@ -623,6 +638,7 @@ class BZTradingSystem:
             self.logger.log(f"{symbol} 风控阻止: {reason}")
             if current_pos != 0:
                 self.executors[symbol].close_position()
+                self.record_trade(symbol)  # 平仓后也要记录时间
             return
         
         # 信号映射: 0=卖出, 1=持有, 2=买入
@@ -648,6 +664,12 @@ class BZTradingSystem:
             except Exception as e:
                 self.logger.log(f"{symbol} 检测持仓失败: {e}")
                 return  # 检测失败时不交易
+            
+            # 检测自动平仓（止盈止损导致）
+            if self.previous_position.get(symbol, 0) > 0 and real_position == 0:
+                self.logger.log(f"{symbol} 检测到自动平仓，记录冷静期")
+                self.record_trade(symbol)
+            self.previous_position[symbol] = real_position
             
             # 只有在真正没有持仓时才开仓（防止重复开仓）
             if real_position == 0:
@@ -708,7 +730,7 @@ class BZTradingSystem:
 if __name__ == "__main__":
     print("""
     ╔═══════════════════════════════════════════════════════════╗
-    ║        BZ交易系统 1.5.3 - 冷静期版                     ║
+    ║        BZ交易系统 1.5.6 - 实盘测试版(0.03手)            ║
     ║     XGB + LGB + RF + CatBoost + 30分钟冷静期          ║
     ╚═══════════════════════════════════════════════════════════╝
     """)
