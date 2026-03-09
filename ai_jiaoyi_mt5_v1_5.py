@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BZ交易系统 1.5.6 - 实盘测试版
+BZ交易系统 1.5.9 - Scaler修复版
 =======================
-版本: 1.5.6
+版本: 1.5.9
 日期: 2026-03-09
 作者: 包子
 
@@ -17,6 +17,11 @@ BZ交易系统 1.5.6 - 实盘测试版
 - 修复：平仓后也要记录时间，冷静期从平仓开始算
 - 新增：自动检测止盈止损平仓并记录冷静期
 - 实盘参数：初始资金$1000，手数0.03
+- 修复：只在模型未训练时训练和保存
+- 修复：简化持仓检测逻辑
+- 修复：有持仓时检查方向，与信号相反则平仓
+- 修复：scaler使用scaler_fitted标志判断，不再每次重新fit
+- 修复：预测用最后3根K线平均，更稳定
 
 运行: python ai_jiaoyi_mt5_v1_5.py
 """
@@ -70,9 +75,10 @@ class Config:
     # 交易参数
     STOP_LOSS_ATR = 20   # 黄金止损20美元
     TAKE_PROFIT_ATR = 60  # 黄金止盈60美元
-    OIL_STOP_LOSS = 1      # 原油止损1美元
+    OIL_STOP_LOSS = 2      # 原油止损2美元
     OIL_TAKE_PROFIT = 3    # 原油止盈3美元
-    SIGNAL_THRESHOLD = 0.50  # 提高到50%减少噪音
+    SIGNAL_THRESHOLD = 0.50  # 默认置信度50%开仓
+    OIL_SIGNAL_THRESHOLD = 0.73  # 原油73%才开仓
     MAX_POSITION = 1.0
     
     # 风控参数
@@ -312,12 +318,14 @@ class EnsembleModel:
         self.symbol = symbol
         self.weights = Config.MODEL_WEIGHTS
         self.scaler = StandardScaler()
+        self.scaler_fitted = False  # 标记scaler是否fit过
         self.is_trained = False
         self.models = {'xgb': XGBPredictor(), 'lgb': LGBPredictor(), 'catboost': CatBoostPredictor(), 'rf': RFPredictor()}
         os.makedirs(Config.MODEL_DIR, exist_ok=True)
     
     def train(self, X, y):
         X_scaled = self.scaler.fit_transform(X)
+        self.scaler_fitted = True
         X_train, X_val, y_train, y_val = train_test_split(X_scaled, y, test_size=0.2, shuffle=False)
         for name, model in self.models.items():
             print(f"训练 {self.symbol} - {name}...")
@@ -360,12 +368,15 @@ class EnsembleModel:
                 except:
                     pass
         self.is_trained = all_loaded
+        if all_loaded:
+            self.scaler_fitted = True
         return self.is_trained
     
     def predict_proba(self, X):
-        # 每次都重新fit scaler确保准确
-        self.scaler = StandardScaler()
-        self.scaler.fit(X[:min(50, len(X))])
+        # 使用已训练的scaler，不再每次重新fit
+        if not self.scaler_fitted:
+            self.scaler.fit(X[:min(50, len(X))])
+            self.scaler_fitted = True
         
         X_scaled = self.scaler.transform(X)
         ensemble_proba = np.zeros((len(X), 3))
@@ -379,12 +390,12 @@ class EnsembleModel:
                 pass
         
         return ensemble_proba
-        return ensemble_proba
     
     def predict(self, X):
         proba = self.predict_proba(X)
-        # 返回最后一个预测
-        return np.argmax(proba[-1])
+        # 取最后3根K线的平均概率，更稳定
+        avg_proba = np.mean(proba[-3:], axis=0)
+        return np.argmax(avg_proba)
 
 
 # ==================== 交易执行 ====================
@@ -564,7 +575,7 @@ class BZTradingSystem:
     
     def initialize(self):
         self.logger.log("=" * 50)
-        self.logger.log("BZ交易系统 1.5.6 启动 (实盘测试版 - 手数0.03)")
+        self.logger.log("BZ交易系统 1.5.9 启动 (Scaler修复版)")
         self.logger.log(f"交易品种: {Config.SYMBOLS}")
         self.logger.log(f"冷静期: {Config.COOLDOWN_MINUTES}分钟")
         self.logger.log("=" * 50)
@@ -620,76 +631,96 @@ class BZTradingSystem:
         X = df[Config.FEATURES].values
         y = df['label'].values
         
-        if True:  # 每次都重新训练以便调试
+        # 只在模型未训练时训练（避免每次循环都训练）
+        if not self.ensembles[symbol].is_trained:
             self.logger.log(f"{symbol} 训练模型...")
             self.ensembles[symbol].train(X, y)
+            # 保存模型
+            self.ensembles[symbol].save()
         
-        current_pos = self.executors[symbol].get_position()
         signal = self.ensembles[symbol].predict(X[-10:])
         proba = self.ensembles[symbol].predict_proba(X[-10:])
         confidence = np.max(proba[-1])
         
         self.logger.log(f"{symbol} 信号: {signal}, 置信度: {confidence:.2%}")
         
+        # 获取真实持仓（只用一个变量）
+        real_position = 0
+        try:
+            if MT5_AVAILABLE:
+                if not mt5.terminal_info().connected:
+                    mt5.initialize(login=Config.MT5_LOGIN, server=Config.MT5_SERVER, password=Config.MT5_PASSWORD)
+                positions = mt5.positions_get(symbol=symbol)
+                if positions:
+                    real_position = sum([p.volume for p in positions])
+                self.logger.log(f"{symbol} 当前持仓: {real_position}")
+        except Exception as e:
+            self.logger.log(f"{symbol} 检测持仓失败: {e}")
+        
+        # 检测自动平仓（止盈止损导致）
+        if self.previous_position.get(symbol, 0) > 0 and real_position == 0:
+            self.logger.log(f"{symbol} 检测到自动平仓，记录冷静期")
+            self.record_trade(symbol)
+        self.previous_position[symbol] = real_position
+        
+        # 风控检查
         balance = self.get_balance()
         allow, reason = self.risk_manager.check(balance)
         
         if not allow:
             self.logger.log(f"{symbol} 风控阻止: {reason}")
-            if current_pos != 0:
+            if real_position != 0:
                 self.executors[symbol].close_position()
-                self.record_trade(symbol)  # 平仓后也要记录时间
+                self.record_trade(symbol)
             return
         
         # 信号映射: 0=卖出, 1=持有, 2=买入
         action_map = {0: "卖出", 1: "持有", 2: "买入"}
         
-        if confidence > Config.SIGNAL_THRESHOLD:
+        # 根据品种使用不同的置信度阈值
+        if 'OIL' in symbol:
+            threshold = Config.OIL_SIGNAL_THRESHOLD
+        else:
+            threshold = Config.SIGNAL_THRESHOLD
+        
+        # 无论置信度是否足够，都检查持仓
+        has_position = real_position != 0
+        
+        if confidence > threshold:
             signal_name = action_map.get(signal, "未知")
             self.logger.log(f"{symbol} 信号: {signal_name} | 置信度: {confidence:.2%}")
             
-            # ====== 修复：确保MT5连接并正确检测持仓 ======
-            real_position = 0
-            try:
-                if MT5_AVAILABLE:
-                    # 确保MT5连接正常
-                    if not mt5.terminal_info().connected:
-                        mt5.initialize(login=Config.MT5_LOGIN, server=Config.MT5_SERVER, password=Config.MT5_PASSWORD)
-                    
-                    # 获取真实持仓
-                    positions = mt5.positions_get(symbol=symbol)
-                    if positions:
-                        real_position = sum([p.volume for p in positions])
-                    self.logger.log(f"{symbol} 当前持仓: {real_position}")
-            except Exception as e:
-                self.logger.log(f"{symbol} 检测持仓失败: {e}")
-                return  # 检测失败时不交易
+            if has_position:
+                # 有持仓时检查方向
+                current_direction = 0 if real_position > 0 else 1  # 0=做多,1=做空
+                if signal != current_direction + 2 and signal != current_direction:
+                    # 信号方向和持仓相反，平仓
+                    self.logger.log(f"{symbol} 信号方向与持仓相反，平仓")
+                    self.executors[symbol].close_position()
+                    self.record_trade(symbol)
             
-            # 检测自动平仓（止盈止损导致）
-            if self.previous_position.get(symbol, 0) > 0 and real_position == 0:
-                self.logger.log(f"{symbol} 检测到自动平仓，记录冷静期")
-                self.record_trade(symbol)
-            self.previous_position[symbol] = real_position
-            
-            # 只有在真正没有持仓时才开仓（防止重复开仓）
+            # 没有持仓时才开仓
             if real_position == 0:
                 # 检查冷静期
                 if not self.check_cooldown(symbol):
                     self.logger.log(f"{symbol} 冷静期阻止开仓")
                 else:
                     if signal == 2:  # 买入信号
-                        self.logger.log(f"{symbol} 执行买入! (signal={signal})")
+                        self.logger.log(f"{symbol} 执行买入!")
                         success = self.executors[symbol].open_position(2)
                         if success:
                             self.risk_manager.daily_trades += 1
-                            self.record_trade(symbol)  # 记录交易时间
+                            self.record_trade(symbol)
                     elif signal == 0:  # 卖出信号
-                        self.logger.log(f"{symbol} 执行卖出! (signal={signal})")
+                        self.logger.log(f"{symbol} 执行卖出!")
                         success = self.executors[symbol].open_position(0)
                         if success:
                             self.risk_manager.daily_trades += 1
-                            self.record_trade(symbol)  # 记录交易时间
-            else:
+                            self.record_trade(symbol)
+        else:
+            # 置信度不够，但有持仓时也检查是否需要平仓
+            if has_position:
+                self.logger.log(f"{symbol} 置信度不足，但有持仓，继续持有")
                 self.logger.log(f"{symbol} 已有持仓 {real_position}，跳过开仓")
     
     def run(self):
@@ -730,7 +761,7 @@ class BZTradingSystem:
 if __name__ == "__main__":
     print("""
     ╔═══════════════════════════════════════════════════════════╗
-    ║        BZ交易系统 1.5.6 - 实盘测试版(0.03手)            ║
+    ║        BZ交易系统 1.5.7 - 逻辑优化版                     ║
     ║     XGB + LGB + RF + CatBoost + 30分钟冷静期          ║
     ╚═══════════════════════════════════════════════════════════╝
     """)
