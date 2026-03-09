@@ -1,0 +1,133 @@
+{
+  "adjustments": [
+    {
+      "timestamp": "2026-03-06 18:43",
+      "reason": "每日参数调整 - 第1次调整",
+      "analysis": {
+        "question_1_model": "模型1小时训练一次跟不上市场变化，需要调整",
+        "question_2_sl": "原油3笔亏损-137到-144，止损1.5太小被打，止盈2.0不够大",
+        "question_3_threshold": "下午观望置信度0.18低于0.35阈值",
+        "question_4_indicator": "技术指标周期正常，保持不变",
+        "question_5_trend": "TREND_STRENGTH_KLINES=7太短容易被短期波动影响",
+        "question_6_momentum": "动量参数正常，保持不变",
+        "question_7_limit": "每天10单限制足够，今天只开8单",
+        "question_8_risk": "风控正常，亏损在3%限额内",
+        "question_9_multi": "多周期策略正常，保持不变"
+      },
+      "changes": {
+        "RETRAIN_INTERVAL": {
+          "from": 3600,
+          "to": 300,
+          "reason": "模型5分钟训练一次"
+        },
+        "SYMBOL_ATR_MULTIPLIER": {
+          "from": 1.5,
+          "to": 2.0,
+          "reason": "止损放宽减少被打"
+        },
+        "SYMBOL_TP_MULTIPLIER": {
+          "from": 2.0,
+          "to": 3.0,
+          "reason": "止盈扩大追求盈亏比"
+        },
+        "min_signal_threshold": {
+          "from": 0.35,
+          "to": 0.4,
+          "reason": "提高信号质量"
+        },
+        "TREND_STRENGTH_KLINES": {
+          "from": 7,
+          "to": 10,
+          "reason": "趋势判断更稳定"
+        }
+      },
+      "result": "调整完成，系统已重启"
+    },
+    {
+      "timestamp": "2026-03-06 19:40",
+      "reason": "系统优化 - 模型融合升级",
+      "changes": {
+        "HMM_TRAIN_INTERVAL": {
+          "from": 3600,
+          "to": 600,
+          "reason": "HMM模型10分钟训练一次"
+        },
+        "STATE_FILTER_ENABLED": {
+          "from": false,
+          "to": true,
+          "reason": "加入状态过滤层"
+        },
+        "ProphetExpert": {
+          "new": true,
+          "reason": "加入MA时序预测专家"
+        }
+      },
+      "result": "1. HMM训练间隔改为600秒; 2. 加入状态过滤层(趋势市场增强趋势专家,震荡市场增强反转专家); 3. 加入简化版ProphetExpert(基于MA交叉预测)",
+      "process_id": 16708
+    },
+    {
+      "timestamp": "2026-03-07 00:16",
+      "reason": "每日参数调整 - 第2次",
+      "analysis": {
+        "golds_win_rate": "61.5% (达标)",
+        "crudeoil_win_rate": "44.8% (需改进)",
+        "recent_losses": "CrudeOIL亏损-140和-137"
+      },
+      "changes": {
+        "status": "参数暂无调整",
+        "reason": "昨晚已调整CrudeOIL为止损1.5/止盈3.0，需观察效果"
+      },
+      "result": "继续观察"
+    }
+  ],
+  "checklist_template": {
+    "description": "每次调整参数前必须回答的问题",
+    "questions": [
+      {
+        "id": 1,
+        "category": "模型训练",
+        "question": "今天所做的单子模型参数对它们有没有影响，需不需要调整？"
+      },
+      {
+        "id": 2,
+        "category": "止盈止损",
+        "question": "今天所做的每一笔亏损单是因为什么：止损太小？止损太大？止盈太小？止盈太大？需不需要调整？"
+      },
+      {
+        "id": 3,
+        "category": "信号阈值",
+        "question": "今天没有开仓/开仓很少/过度开仓的原因是什么，需不需要调整？"
+      },
+      {
+        "id": 4,
+        "category": "技术指标周期",
+        "question": "今天没有开仓/开仓很少/过度开仓的原因是什么，需不需要调整？"
+      },
+      {
+        "id": 5,
+        "category": "趋势参数",
+        "question": "今天没有开仓/开仓很少/过度开仓的原因是什么，需不需要调整？"
+      },
+      {
+        "id": 6,
+        "category": "动量参数",
+        "question": "今天没有开仓/开仓很少/过度开仓的原因是什么，需不需要调整？"
+      },
+      {
+        "id": 7,
+        "category": "交易限制",
+        "question": "今天没有开仓/开仓很少/过度开仓的原因是什么，需不需要调整？"
+      },
+      {
+        "id": 8,
+        "category": "风控",
+        "question": "根据实际情况酌情考虑，需不需要调整？"
+      },
+      {
+        "id": 9,
+        "category": "多周期/策略",
+        "question": "今天没有开仓/开仓很少/过度开仓的原因是什么，需不需要调整？"
+      }
+    ]
+  }
+}
